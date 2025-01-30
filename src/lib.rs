@@ -4,11 +4,11 @@ extern crate lazy_static;
 use lsp_types::{Location, Position, Range};
 use utils::GetPosAndLength;
 
-pub mod comment;
+// pub mod comment;
 pub mod completion;
 pub mod context;
 pub mod document_symbol;
-pub mod fmt;
+// pub mod fmt;
 pub mod goto_definition;
 pub mod hover;
 #[cfg(test)]
