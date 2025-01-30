@@ -173,7 +173,7 @@ fn on_request(context: &mut Context, request: &lsp_server::Request) {
             document_symbol::on_document_symbol_request(context, request);
         }
         lsp_types::request::SemanticTokensFullRequest::METHOD => {
-            semantic_tokens::on_senantic_tokens(context, request);
+            semantic_tokens::on_semantic_tokens(context, request);
         }
         lsp_types::request::InlayHintRequest::METHOD => {
             inlay_hitnt::on_inlay_hints(context, request);

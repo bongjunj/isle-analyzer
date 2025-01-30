@@ -6,6 +6,8 @@ use crate::project::RefVecDefAstProvider;
 use super::context::*;
 use super::to_lsp_range;
 use cranelift_isle::ast::Pattern;
+use cranelift_isle::error::Error;
+use cranelift_isle::files::Files;
 use cranelift_isle::parser::parse;
 use cranelift_isle::{
     ast::*,
@@ -16,17 +18,18 @@ use lsp_server::*;
 use lsp_types::*;
 
 /// Handles semantic tokens request for LSP server.
-pub fn on_senantic_tokens(context: &Context, request: &Request) {
+pub fn on_semantic_tokens(context: &Context, request: &Request) {
     let parameters = serde_json::from_value::<SemanticTokensParams>(request.params.clone())
         .expect("could not deserialize semantic tokens request");
     let fpath = parameters.text_document.uri.to_file_path().unwrap();
-    let lexer = Lexer::from_files(vec![fpath.clone()]).unwrap();
-    let asts = match parse(lexer) {
+    let files = Files::from_paths(vec![&fpath]).expect("cannot read file");
+    let lexer = Lexer::new(0, files.file_text(0).unwrap()).unwrap();
+    let defs = match parse(lexer) {
         Ok(x) => x,
         Err(_) => return,
     };
-    let asts = RefVecDefAstProvider { defs: &asts.defs };
-    let mut collector = AstSemanticTokenCollector::new();
+    let asts = RefVecDefAstProvider { defs: &defs };
+    let mut collector = AstSemanticTokenCollector::new(files);
     asts.with_def(|d| collector.collect_def(d));
     let mut tokens = collector.to_tokens();
     tokens.extend(match collect_keywords(&fpath) {
@@ -63,20 +66,18 @@ pub fn on_senantic_tokens(context: &Context, request: &Request) {
         .unwrap();
 }
 
-struct AstSemanticTokenCollector {
-    results: Vec<RangeToken>,
-}
-
-fn collect_keywords(path: &PathBuf) -> Result<Vec<RangeToken>, Errors> {
+fn collect_keywords(path: &PathBuf) -> Result<Vec<RangeToken>, Error> {
     let content = std::fs::read_to_string(path.as_path()).unwrap();
-    let mut lexer = Lexer::from_str(content.as_str(), path.as_path().to_str().unwrap())?;
+    let files = Files::from_paths(vec![path]).expect("cannot read file");
+    let mut lexer = Lexer::new(0, &content)?;
+    // let mut lexer = Lexer::from_str(content.as_str(), path.as_path().to_str().unwrap())?;
     let mut ret = Vec::new();
     while let Some((pos, t)) = lexer.next()? {
         match t {
             Token::Symbol(s) => {
                 if super::KEYWORDS.contains(s.as_str()) {
                     ret.push(RangeToken {
-                        range: to_lsp_range(&(pos, s.len() as u32)),
+                        range: to_lsp_range(&(pos, s.len() as u32), &files),
                         token_type: TokenTypes::Keyword,
                         modifiers: None,
                     });
@@ -109,9 +110,17 @@ impl CollectPatternType {
     }
 }
 
+struct AstSemanticTokenCollector {
+    files: Files,
+    results: Vec<RangeToken>,
+}
+
 impl AstSemanticTokenCollector {
-    fn new() -> Self {
-        Self { results: vec![] }
+    fn new(files: Files) -> Self {
+        Self {
+            files,
+            results: vec![],
+        }
     }
     fn to_tokens(self) -> Vec<RangeToken> {
         self.results
@@ -125,19 +134,26 @@ impl AstSemanticTokenCollector {
             Def::Decl(x) => self.collect_decl(x),
             Def::Extern(x) => self.collect_extern(x),
             Def::Converter(x) => self.collect_converter(x),
+
+            // ISLE Language Grammar verification extensions
+            // Out of scope for now
+            Def::Spec(_) => todo!(),
+            Def::Model(_) => todo!(),
+            Def::Form(_) => todo!(),
+            Def::Instantiation(_) => todo!(),
         }
     }
 
     fn collect_type(&mut self, d: &Type) {
         self.results.push(RangeToken {
-            range: to_lsp_range(&d.name),
+            range: to_lsp_range(&d.name, &self.files),
             token_type: TokenTypes::Type,
             modifiers: Some(TokenModifier::Declaration),
         });
         match &d.ty {
             TypeValue::Primitive(x, _) => {
                 self.results.push(RangeToken {
-                    range: to_lsp_range(x),
+                    range: to_lsp_range(x, &self.files),
                     token_type: TokenTypes::Type,
                     modifiers: None,
                 });
@@ -145,18 +161,18 @@ impl AstSemanticTokenCollector {
             TypeValue::Enum(enums, _) => {
                 for v in enums.iter() {
                     self.results.push(RangeToken {
-                        range: to_lsp_range(&v.name),
+                        range: to_lsp_range(&v.name, &self.files),
                         token_type: TokenTypes::EnumMember,
                         modifiers: Some(TokenModifier::Declaration),
                     });
                     for f in v.fields.iter() {
                         self.results.push(RangeToken {
-                            range: to_lsp_range(&f.name),
+                            range: to_lsp_range(&f.name, &self.files),
                             token_type: TokenTypes::EnumMember,
                             modifiers: Some(TokenModifier::Declaration),
                         });
                         self.results.push(RangeToken {
-                            range: to_lsp_range(&f.ty),
+                            range: to_lsp_range(&f.ty, &self.files),
                             token_type: TokenTypes::Type,
                             modifiers: None,
                         });
@@ -179,7 +195,7 @@ impl AstSemanticTokenCollector {
         match e {
             Expr::Term { sym, args, .. } => {
                 self.results.push(RangeToken {
-                    range: to_lsp_range(sym),
+                    range: to_lsp_range(sym, &self.files),
                     token_type: TokenTypes::Variable,
                     modifiers: None,
                 });
@@ -189,15 +205,16 @@ impl AstSemanticTokenCollector {
             }
             Expr::Var { name, .. } => {
                 self.results.push(RangeToken {
-                    range: to_lsp_range(name),
+                    range: to_lsp_range(name, &self.files),
                     token_type: TokenTypes::Variable,
                     modifiers: None,
                 });
             }
+            Expr::ConstBool { val: _, pos: _ } => {}
             Expr::ConstInt { val: _, pos: _ } => {}
             Expr::ConstPrim { val, pos: _ } => {
                 self.results.push(RangeToken {
-                    range: to_lsp_range(val),
+                    range: to_lsp_range(val, &self.files),
                     token_type: TokenTypes::String,
                     modifiers: None,
                 });
@@ -206,12 +223,12 @@ impl AstSemanticTokenCollector {
             Expr::Let { defs, body, .. } => {
                 for d in defs.iter() {
                     self.results.push(RangeToken {
-                        range: to_lsp_range(&d.var),
+                        range: to_lsp_range(&d.var, &self.files),
                         token_type: TokenTypes::Number,
                         modifiers: Some(TokenModifier::Declaration),
                     });
                     self.results.push(RangeToken {
-                        range: to_lsp_range(&d.ty),
+                        range: to_lsp_range(&d.ty, &self.files),
                         token_type: TokenTypes::Type,
                         modifiers: Some(TokenModifier::Declaration),
                     });
@@ -222,13 +239,13 @@ impl AstSemanticTokenCollector {
     }
     fn collect_extractor(&mut self, d: &Extractor) {
         self.results.push(RangeToken {
-            range: to_lsp_range(&d.term),
+            range: to_lsp_range(&d.term, &self.files),
             token_type: TokenTypes::Function,
             modifiers: None,
         });
         for a in d.args.iter() {
             self.results.push(RangeToken {
-                range: to_lsp_range(a),
+                range: to_lsp_range(a, &self.files),
                 token_type: TokenTypes::Variable,
                 modifiers: Some(TokenModifier::Declaration),
             });
@@ -239,7 +256,7 @@ impl AstSemanticTokenCollector {
     fn collect_pattern(&mut self, p: &Pattern, mode: CollectPatternType) {
         match p {
             Pattern::Var { var, .. } => self.results.push(RangeToken {
-                range: to_lsp_range(var),
+                range: to_lsp_range(var, &self.files),
                 token_type: TokenTypes::Variable,
                 modifiers: mode.to_modifier(),
             }),
@@ -249,29 +266,36 @@ impl AstSemanticTokenCollector {
                 pos: _,
             } => {
                 self.results.push(RangeToken {
-                    range: to_lsp_range(var),
+                    range: to_lsp_range(var, &self.files),
                     token_type: TokenTypes::Variable,
                     modifiers: None,
                 });
                 self.collect_pattern(subpat.as_ref(), mode);
             }
+            Pattern::ConstBool { val: _, pos } => {
+                self.results.push(RangeToken {
+                    range: to_lsp_range(&(pos.clone(), 0 as u32), &self.files),
+                    token_type: TokenTypes::Keyword,
+                    modifiers: None,
+                });
+            }
             Pattern::ConstInt { val: _, pos } => {
                 self.results.push(RangeToken {
-                    range: to_lsp_range(&(pos.clone(), 0 as u32)),
+                    range: to_lsp_range(&(pos.clone(), 0 as u32), &self.files),
                     token_type: TokenTypes::Number,
                     modifiers: None,
                 });
             }
             Pattern::ConstPrim { val, .. } => {
                 self.results.push(RangeToken {
-                    range: to_lsp_range(val),
+                    range: to_lsp_range(val, &self.files),
                     token_type: TokenTypes::String,
                     modifiers: None,
                 });
             }
             Pattern::Term { sym, args, pos: _ } => {
                 self.results.push(RangeToken {
-                    range: to_lsp_range(sym),
+                    range: to_lsp_range(sym, &self.files),
                     token_type: TokenTypes::Variable,
                     modifiers: None,
                 });
@@ -291,19 +315,19 @@ impl AstSemanticTokenCollector {
 
     fn collect_decl(&mut self, d: &Decl) {
         self.results.push(RangeToken {
-            range: to_lsp_range(&d.term),
+            range: to_lsp_range(&d.term, &self.files),
             token_type: TokenTypes::Struct,
             modifiers: Some(TokenModifier::Declaration),
         });
         for t in d.arg_tys.iter() {
             self.results.push(RangeToken {
-                range: to_lsp_range(t),
+                range: to_lsp_range(t, &self.files),
                 token_type: TokenTypes::Type,
                 modifiers: None,
             });
         }
         self.results.push(RangeToken {
-            range: to_lsp_range(&d.ret_ty),
+            range: to_lsp_range(&d.ret_ty, &self.files),
             token_type: TokenTypes::Type,
             modifiers: None,
         });
@@ -313,26 +337,26 @@ impl AstSemanticTokenCollector {
         match d {
             Extern::Extractor { term, .. } => {
                 self.results.push(RangeToken {
-                    range: to_lsp_range(term),
+                    range: to_lsp_range(term, &self.files),
                     token_type: TokenTypes::Function,
                     modifiers: None,
                 });
             }
             Extern::Constructor { term, .. } => {
                 self.results.push(RangeToken {
-                    range: to_lsp_range(term),
+                    range: to_lsp_range(term, &self.files),
                     token_type: TokenTypes::Function,
                     modifiers: None,
                 });
             }
             Extern::Const { name, ty, .. } => {
                 self.results.push(RangeToken {
-                    range: to_lsp_range(name),
+                    range: to_lsp_range(name, &self.files),
                     token_type: TokenTypes::Variable,
                     modifiers: None,
                 });
                 self.results.push(RangeToken {
-                    range: to_lsp_range(ty),
+                    range: to_lsp_range(ty, &self.files),
                     token_type: TokenTypes::Type,
                     modifiers: None,
                 });
@@ -342,18 +366,18 @@ impl AstSemanticTokenCollector {
 
     fn collect_converter(&mut self, d: &Converter) {
         self.results.push(RangeToken {
-            range: to_lsp_range(&d.term),
+            range: to_lsp_range(&d.term, &self.files),
             token_type: TokenTypes::Function,
             modifiers: Some(TokenModifier::Declaration),
         });
         self.results.push(RangeToken {
-            range: to_lsp_range(&d.inner_ty),
+            range: to_lsp_range(&d.inner_ty, &self.files),
             token_type: TokenTypes::Type,
             modifiers: None,
         });
 
         self.results.push(RangeToken {
-            range: to_lsp_range(&d.outer_ty),
+            range: to_lsp_range(&d.outer_ty, &self.files),
             token_type: TokenTypes::Type,
             modifiers: None,
         });

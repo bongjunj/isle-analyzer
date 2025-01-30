@@ -1,6 +1,7 @@
 #[macro_use]
 extern crate lazy_static;
 
+use cranelift_isle::files::Files;
 use lsp_types::{Location, Position, Range};
 use utils::GetPosAndLength;
 
@@ -57,10 +58,14 @@ lazy_static! {
     };
 }
 
-pub(crate) fn to_lsp_range<T: GetPosAndLength>(x: &T) -> Range {
+pub(crate) fn to_lsp_range<T: GetPosAndLength>(x: &T, files: &Files) -> Range {
     let (pos, length) = x.get_pos_and_len();
-    let line = (pos.line - 1) as u32;
-    let col = pos.col as u32;
+    let linemap = files.file_line_map(pos.file).unwrap();
+    let line = linemap.line(pos.offset);
+    let col = pos.offset - linemap.get(line).unwrap();
+
+    let line = line as u32;
+    let col = col as u32;
     Range {
         start: Position {
             line,
