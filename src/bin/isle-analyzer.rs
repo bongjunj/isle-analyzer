@@ -6,7 +6,7 @@ use crossbeam::channel::select;
 use isle_analyzer::reload;
 use isle_analyzer::{
     completion::on_completion_request, context::*, document_symbol, goto_definition, hover,
-    inlay_hitnt, project::Project, references, rename::on_rename, semantic_tokens, show_rust_code,
+    inlay_hints, project::Project, references, rename::on_rename, semantic_tokens, show_rust_code,
 };
 use log::*;
 use lsp_types::notification::Notification;
@@ -177,7 +177,7 @@ fn on_request(context: &mut Context, request: &lsp_server::Request) {
             semantic_tokens::on_semantic_tokens(context, request);
         }
         lsp_types::request::InlayHintRequest::METHOD => {
-            inlay_hitnt::on_inlay_hints(context, request);
+            inlay_hints::on_inlay_hints(context, request);
         }
         lsp_types::request::Rename::METHOD => {
             on_rename(context, request);
