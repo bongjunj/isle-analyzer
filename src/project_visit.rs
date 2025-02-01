@@ -1,6 +1,7 @@
 use super::item::*;
 use super::project::*;
 use cranelift_isle::ast::*;
+use cranelift_isle::lexer::Pos;
 
 impl Project {
     pub(crate) fn visit(&self, provider: impl AstProvider, handler: &mut dyn ItemOrAccessHandler) {
@@ -249,6 +250,28 @@ fn find_variant<'a>(xs: &'a Vec<Variant>, name: &str) -> Option<&'a Variant> {
     None
 }
 
+fn parse_identifier(ident: &Ident) -> Vec<(String, Pos)> {
+    let ids: Vec<_> = ident.0.split('.').map(|x| x.to_string()).collect();
+
+    if ids.len() == 1 {
+        return vec![(ids[0].clone(), ident.1)];
+    }
+
+    assert!(ids.len() == 2);
+    let first_len = ids[0].len();
+
+    vec![
+        (ids[0].clone(), ident.1),
+        (
+            ids[1].clone(),
+            Pos {
+                file: ident.1.file,
+                offset: ident.1.offset + first_len + 1,
+            },
+        ),
+    ]
+}
+
 impl Project {
     pub(crate) fn apply_matcher(&self, p: &Pattern, handler: &mut dyn ItemOrAccessHandler) {
         let handle_term = |sym: &Ident,
@@ -257,67 +280,65 @@ impl Project {
             Vec<Ident>, //  not all them are filed.
             Ident,
         )> {
-            match SplitedSymbol::from(sym) {
-                SplitedSymbol::One(_) => {
-                    let decl = self.context.query_item_clone(&sym.0);
-                    let item = ItemOrAccess::Access(Access {
-                        kind: AccessKind::ApplyEORC,
-                        access: sym.clone(),
-                        def: decl.clone(),
-                    });
-                    handler.handle_item_or_access(self, &item);
-                    return match &decl {
-                        Item::Decl { decl, .. } => {
-                            Some((decl.arg_tys.clone(), decl.ret_ty.clone()))
-                        }
+            let parsed = parse_identifier(sym);
+            if parsed.len() == 1 {
+                let decl = self.context.query_item_clone(&sym.0);
+                let item = ItemOrAccess::Access(Access {
+                    kind: AccessKind::ApplyEORC,
+                    access: sym.clone(),
+                    def: decl.clone(),
+                });
+                handler.handle_item_or_access(self, &item);
+                return match &decl {
+                    Item::Decl { decl, .. } => Some((decl.arg_tys.clone(), decl.ret_ty.clone())),
 
-                        _ => None,
-                    };
+                    _ => None,
+                };
+            } else if parsed.len() == 2 {
+                let x = parsed[0].clone();
+                let y = parsed[1].clone();
+
+                let def = self
+                    .context
+                    .query_item(&x.0, |x| x.clone())
+                    .unwrap_or_default();
+                let item = ItemOrAccess::Access(Access {
+                    kind: AccessKind::ApplyEORC,
+                    access: sym.clone(),
+                    def: def.clone(),
+                });
+                handler.handle_item_or_access(self, &item);
+                if handler.finished() {
+                    return None;
                 }
-
-                SplitedSymbol::Two([x, y]) => {
-                    let def = self
-                        .context
-                        .query_item(&x.symbol, |x| x.clone())
-                        .unwrap_or_default();
-                    let item = ItemOrAccess::Access(Access {
-                        kind: AccessKind::ApplyEORC,
-                        access: sym.clone(),
-                        def: def.clone(),
-                    });
-                    handler.handle_item_or_access(self, &item);
-                    if handler.finished() {
-                        return None;
-                    }
-                    match def {
-                        Item::Type { ty } => match &ty.ty {
-                            TypeValue::Primitive(_, _) => {}
-                            TypeValue::Enum(variants, _) => {
-                                let v = find_variant(variants, y.symbol.as_str())
-                                    .map(|x| x.clone())
-                                    .unwrap_or(Variant {
-                                        name: y.clone().into(),
-                                        fields: vec![],
-                                        pos: y.pos,
-                                    });
-
-                                let item = ItemOrAccess::Access(Access {
-                                    access: y.clone().into(),
-                                    kind: AccessKind::ApplyVariant(x.symbol.clone()),
-                                    def: Item::EnumVariant { v: v.clone() },
+                match def {
+                    Item::Type { ty } => match &ty.ty {
+                        TypeValue::Primitive(_, _) => {}
+                        TypeValue::Enum(variants, _) => {
+                            let v = find_variant(variants, y.0.as_str())
+                                .map(|x| x.clone())
+                                .unwrap_or(Variant {
+                                    name: Ident(y.0.clone(), y.1),
+                                    fields: vec![],
+                                    pos: y.1,
                                 });
-                                handler.handle_item_or_access(self, &item);
-                                if handler.finished() {
-                                    return Some((
-                                        v.fields.iter().map(|x| x.ty.clone()).collect(),
-                                        ty.name.clone(),
-                                    ));
-                                }
+
+                            let item = ItemOrAccess::Access(Access {
+                                access: Ident(y.0, y.1),
+                                kind: AccessKind::ApplyVariant(x.0.clone()),
+                                def: Item::EnumVariant { v: v.clone() },
+                            });
+                            handler.handle_item_or_access(self, &item);
+                            if handler.finished() {
+                                return Some((
+                                    v.fields.iter().map(|x| x.ty.clone()).collect(),
+                                    ty.name.clone(),
+                                ));
                             }
-                        },
-                        _ => {}
-                    };
-                }
+                        }
+                    },
+                    _ => {}
+                };
             };
 
             return None;
@@ -336,7 +357,7 @@ impl Project {
             Pattern::BindPattern { subpat, .. } => {
                 self.apply_matcher(subpat.as_ref(), handler);
             }
-
+            Pattern::ConstBool { .. } => {}
             Pattern::ConstInt { .. } => {}
             Pattern::ConstPrim { val, .. } => {
                 let item = ItemOrAccess::Access(Access {
@@ -375,6 +396,7 @@ impl Project {
                         Pattern::BindPattern { var, .. } => {
                             enter_var(index, var, handler);
                         }
+                        Pattern::ConstBool { .. } => {}
                         Pattern::ConstInt { .. } => {}
                         Pattern::ConstPrim { .. } => self.apply_matcher(a, handler),
                         Pattern::Term { .. } => self.apply_matcher(a, handler),
@@ -401,63 +423,64 @@ impl Project {
 
 impl Project {
     pub(crate) fn apply_expr(&self, e: &Expr, handler: &mut dyn ItemOrAccessHandler) {
-        let handle_term =
-            |sym: &Ident, handler: &mut dyn ItemOrAccessHandler| match SplitedSymbol::from(sym) {
-                SplitedSymbol::One(_) => {
-                    let item = ItemOrAccess::Access(Access {
-                        kind: AccessKind::ApplyEORC,
-                        access: sym.clone(),
-                        def: self
-                            .context
-                            .query_item(&sym.0, |x| x.clone())
-                            .unwrap_or_default(),
-                    });
-                    handler.handle_item_or_access(self, &item);
-                    if handler.finished() {
-                        return;
-                    }
-                }
-                SplitedSymbol::Two([x, y]) => {
-                    let def = self
+        let handle_term = |sym: &Ident, handler: &mut dyn ItemOrAccessHandler| {
+            let parsed = parse_identifier(sym);
+            if parsed.len() == 1 {
+                let item = ItemOrAccess::Access(Access {
+                    kind: AccessKind::ApplyEORC,
+                    access: sym.clone(),
+                    def: self
                         .context
-                        .query_item(&x.symbol, |x| x.clone())
-                        .unwrap_or_default();
-                    let item = ItemOrAccess::Access(Access {
-                        kind: AccessKind::ApplyEORC,
-
-                        access: sym.clone(),
-                        def: def.clone(),
-                    });
-                    handler.handle_item_or_access(self, &item);
-                    if handler.finished() {
-                        return;
-                    }
-                    match def {
-                        Item::Type { ty } => match &ty.ty {
-                            TypeValue::Primitive(_, _) => {}
-                            TypeValue::Enum(variants, _) => {
-                                let v = find_variant(variants, y.symbol.as_str())
-                                    .map(|x| x.clone())
-                                    .unwrap_or(Variant {
-                                        name: Ident(y.symbol.clone(), y.pos),
-                                        fields: vec![],
-                                        pos: y.pos,
-                                    });
-                                let item = ItemOrAccess::Access(Access {
-                                    access: y.clone().into(),
-                                    kind: AccessKind::ApplyVariant(x.symbol.clone()),
-                                    def: Item::EnumVariant { v },
-                                });
-                                handler.handle_item_or_access(self, &item);
-                                if handler.finished() {
-                                    return;
-                                }
-                            }
-                        },
-                        _ => {}
-                    };
+                        .query_item(&sym.0, |x| x.clone())
+                        .unwrap_or_default(),
+                });
+                handler.handle_item_or_access(self, &item);
+                if handler.finished() {
+                    return;
                 }
-            };
+            } else if parsed.len() == 2 {
+                let x = parsed[0].clone();
+                let y = parsed[1].clone();
+                let def = self
+                    .context
+                    .query_item(&x.0, |x| x.clone())
+                    .unwrap_or_default();
+                let item = ItemOrAccess::Access(Access {
+                    kind: AccessKind::ApplyEORC,
+
+                    access: sym.clone(),
+                    def: def.clone(),
+                });
+                handler.handle_item_or_access(self, &item);
+                if handler.finished() {
+                    return;
+                }
+                match def {
+                    Item::Type { ty } => match &ty.ty {
+                        TypeValue::Primitive(_, _) => {}
+                        TypeValue::Enum(variants, _) => {
+                            let v = find_variant(variants, y.0.as_str())
+                                .map(|x| x.clone())
+                                .unwrap_or(Variant {
+                                    name: Ident(y.0.clone(), y.1),
+                                    fields: vec![],
+                                    pos: y.1,
+                                });
+                            let item = ItemOrAccess::Access(Access {
+                                access: Ident(y.0, y.1),
+                                kind: AccessKind::ApplyVariant(x.0.clone()),
+                                def: Item::EnumVariant { v },
+                            });
+                            handler.handle_item_or_access(self, &item);
+                            if handler.finished() {
+                                return;
+                            }
+                        }
+                    },
+                    _ => {}
+                };
+            }
+        };
 
         match e {
             Expr::Term { sym, args, .. } => {
@@ -474,6 +497,7 @@ impl Project {
                 });
                 handler.handle_item_or_access(self, &item);
             }
+            Expr::ConstBool { .. } => {}
             Expr::ConstInt { .. } => {}
             Expr::ConstPrim { val, .. } => {
                 let item = ItemOrAccess::Access(Access {
@@ -546,6 +570,7 @@ impl Project {
                 }
                 self.apply_extractor(subpat.as_ref(), handler);
             }
+            Pattern::ConstBool { .. } => {}
             Pattern::ConstInt { .. } => {}
             Pattern::ConstPrim { val, .. } => {
                 let item = ItemOrAccess::Access(Access {
@@ -562,61 +587,62 @@ impl Project {
                 }
             }
             Pattern::Term { sym, args, pos: _ } => {
-                match SplitedSymbol::from(sym) {
-                    SplitedSymbol::One(_) => {
-                        let item = ItemOrAccess::Access(Access {
-                            access: sym.clone(),
-                            kind: AccessKind::ApplyEORC,
-                            def: self
-                                .context
-                                .query_item(&sym.0, |x| x.clone())
-                                .unwrap_or_default(),
-                        });
-                        handler.handle_item_or_access(self, &item);
-                        if handler.finished() {
-                            return;
-                        }
-                    }
-                    SplitedSymbol::Two([x, y]) => {
-                        let def = self
+                let parsed = parse_identifier(sym);
+                if parsed.len() == 1 {
+                    let item = ItemOrAccess::Access(Access {
+                        access: sym.clone(),
+                        kind: AccessKind::ApplyEORC,
+                        def: self
                             .context
-                            .query_item(&x.symbol, |x| x.clone())
-                            .unwrap_or_default();
-                        let item = ItemOrAccess::Access(Access {
-                            kind: AccessKind::ApplyEORC,
-                            access: sym.clone(),
-                            def: def.clone(),
-                        });
-                        handler.handle_item_or_access(self, &item);
-                        if handler.finished() {
-                            return;
-                        }
-                        match def {
-                            Item::Type { ty } => match &ty.ty {
-                                TypeValue::Primitive(_, _) => {}
-                                TypeValue::Enum(variants, _) => {
-                                    let v = find_variant(variants, y.symbol.as_str())
-                                        .map(|x| x.clone())
-                                        .unwrap_or(Variant {
-                                            name: Ident(y.symbol.clone(), y.pos),
-                                            fields: vec![],
-                                            pos: y.pos,
-                                        });
-                                    let item = ItemOrAccess::Access(Access {
-                                        kind: AccessKind::ApplyVariant(x.symbol.clone()),
-                                        access: y.clone().into(),
-                                        def: Item::EnumVariant { v },
-                                    });
-                                    handler.handle_item_or_access(self, &item);
-                                    if handler.finished() {
-                                        return;
-                                    }
-                                }
-                            },
-                            _ => {}
-                        };
+                            .query_item(&sym.0, |x| x.clone())
+                            .unwrap_or_default(),
+                    });
+                    handler.handle_item_or_access(self, &item);
+                    if handler.finished() {
+                        return;
                     }
+                } else if parsed.len() == 2 {
+                    let x = parsed[0].clone();
+                    let y = parsed[1].clone();
+                    let def = self
+                        .context
+                        .query_item(&x.0, |x| x.clone())
+                        .unwrap_or_default();
+                    let item = ItemOrAccess::Access(Access {
+                        kind: AccessKind::ApplyEORC,
+                        access: sym.clone(),
+                        def: def.clone(),
+                    });
+                    handler.handle_item_or_access(self, &item);
+                    if handler.finished() {
+                        return;
+                    }
+                    match def {
+                        Item::Type { ty } => match &ty.ty {
+                            TypeValue::Primitive(_, _) => {}
+                            TypeValue::Enum(variants, _) => {
+                                let v = find_variant(variants, y.0.as_str())
+                                    .map(|x| x.clone())
+                                    .unwrap_or(Variant {
+                                        name: Ident(y.0.clone(), y.1),
+                                        fields: vec![],
+                                        pos: y.1,
+                                    });
+                                let item = ItemOrAccess::Access(Access {
+                                    kind: AccessKind::ApplyVariant(x.0.clone()),
+                                    access: Ident(y.0, y.1),
+                                    def: Item::EnumVariant { v },
+                                });
+                                handler.handle_item_or_access(self, &item);
+                                if handler.finished() {
+                                    return;
+                                }
+                            }
+                        },
+                        _ => {}
+                    };
                 }
+
                 for a in args.iter() {
                     self.apply_extractor(a, handler);
                     if handler.finished() {

@@ -1,7 +1,7 @@
 #[macro_use]
 extern crate lazy_static;
 
-use cranelift_isle::files::Files;
+use cranelift_isle::{ast::Def, files::Files, lexer::Lexer};
 use lsp_types::{Location, Position, Range};
 use utils::GetPosAndLength;
 
@@ -56,6 +56,28 @@ lazy_static! {
         t.insert("enum");
         t
     };
+}
+
+pub(crate) fn defs_of_files(files: &Files) -> Vec<Def> {
+    let mut defs = Vec::new();
+    for (file, src) in files.file_texts.iter().enumerate() {
+        let lexer = match Lexer::new(file, src) {
+            Ok(lexer) => lexer,
+            Err(err) => {
+                log::error!("lexer error:{:?}", err);
+                continue;
+            }
+        };
+
+        match cranelift_isle::parser::parse(lexer) {
+            Ok(mut ds) => defs.append(&mut ds),
+            Err(err) => {
+                log::error!("parse error:{:?}", err);
+                continue;
+            }
+        }
+    }
+    defs
 }
 
 pub(crate) fn to_lsp_range<T: GetPosAndLength>(x: &T, files: &Files) -> Range {

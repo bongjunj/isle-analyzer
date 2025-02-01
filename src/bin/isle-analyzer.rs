@@ -1,3 +1,4 @@
+use cranelift_isle::files::Files;
 use cranelift_isle::lexer::Pos;
 
 use clap::Parser;
@@ -14,7 +15,7 @@ use lsp_types::*;
 use std::collections::HashMap;
 
 use std::path::*;
-use std::str::FromStr;
+
 struct SimpleLogger;
 impl log::Log for SimpleLogger {
     fn enabled(&self, metadata: &Metadata) -> bool {
@@ -234,20 +235,16 @@ fn update_defs(context: &mut Context, fpath: &PathBuf, content: &str) {
 }
 
 fn send_diag(context: &mut Context) {
-    let files = context
-        .project
-        .get_filenames()
-        .iter()
-        .map(|x| PathBuf::from_str(x.as_ref()).unwrap())
-        .collect::<Vec<_>>();
+    let files = &context.project.files;
+    let filenames = context.project.get_filenames();
     match cranelift_isle::compile::from_files(
-        &files,
+        &filenames,
         &cranelift_isle::codegen::CodegenOptions {
             exclude_global_allow_pragmas: false,
         },
     ) {
         Ok(_) => {
-            for f in files.iter() {
+            for f in filenames.iter() {
                 let ds = lsp_types::PublishDiagnosticsParams::new(
                     Url::from_file_path(f).unwrap(),
                     vec![],
@@ -299,11 +296,11 @@ fn send_diag(context: &mut Context) {
                         // TODO
                     }
                     cranelift_isle::error::Error::ParseError { msg, span } => {
-                        let file = files[span.to.file].clone();
+                        let file = filenames[span.to.file].clone();
                         let d = Diagnostic {
                             range: Range {
-                                start: pos_to_position(span.from),
-                                end: pos_to_position(span.to),
+                                start: pos_to_position(span.from, files),
+                                end: pos_to_position(span.to, files),
                             },
                             message: format!("{}", msg),
                             ..Default::default()
@@ -311,11 +308,11 @@ fn send_diag(context: &mut Context) {
                         diags.insert(file, d);
                     }
                     TypeError { msg, span } => {
-                        let file = files[span.to.file].clone();
+                        let file = filenames[span.to.file].clone();
                         let d = Diagnostic {
                             range: Range {
-                                start: pos_to_position(span.from),
-                                end: pos_to_position(span.to),
+                                start: pos_to_position(span.from, files),
+                                end: pos_to_position(span.to, files),
                             },
                             message: format!("{}", msg),
                             ..Default::default()
@@ -323,11 +320,11 @@ fn send_diag(context: &mut Context) {
                         diags.insert(file, d);
                     }
                     UnreachableError { msg, span } => {
-                        let file = files[span.to.file].clone();
+                        let file = filenames[span.to.file].clone();
                         let d = Diagnostic {
                             range: Range {
-                                start: pos_to_position(span.from),
-                                end: pos_to_position(span.to),
+                                start: pos_to_position(span.from, files),
+                                end: pos_to_position(span.to, files),
                             },
                             message: format!("{}", msg),
                             ..Default::default()
@@ -336,11 +333,11 @@ fn send_diag(context: &mut Context) {
                     }
                     OverlapError { msg, rules } => {
                         for r in rules.iter() {
-                            let file = files[r.to.file].clone();
+                            let file = filenames[r.to.file].clone();
                             let d = Diagnostic {
                                 range: Range {
-                                    start: pos_to_position(r.from),
-                                    end: pos_to_position(r.to),
+                                    start: pos_to_position(r.from, files),
+                                    end: pos_to_position(r.to, files),
                                 },
                                 message: format!("{}", msg),
                                 ..Default::default()
@@ -350,11 +347,11 @@ fn send_diag(context: &mut Context) {
                     }
                     ShadowedError { shadowed, mask } => {
                         for r in shadowed.iter().chain(vec![mask]) {
-                            let file = files[r.to.file].clone();
+                            let file = filenames[r.to.file].clone();
                             let d = Diagnostic {
                                 range: Range {
-                                    start: pos_to_position(r.from),
-                                    end: pos_to_position(r.to),
+                                    start: pos_to_position(r.from, files),
+                                    end: pos_to_position(r.to, files),
                                 },
                                 message: format!("{}","The rules can never match because another rule will always match first."),
                                 ..Default::default()
@@ -365,7 +362,7 @@ fn send_diag(context: &mut Context) {
                 };
             }
 
-            for f in files.iter() {
+            for f in filenames.iter() {
                 if diags.m.get(f).map(|x| x.len()).unwrap_or(0) == 0 {
                     diags.mk_empty(f.clone());
                 }
@@ -394,9 +391,15 @@ fn send_diag(context: &mut Context) {
     };
 }
 
-fn pos_to_position(x: Pos) -> Position {
+fn pos_to_position(pos: Pos, files: &Files) -> Position {
+    let linemap = files.file_line_map(pos.file).unwrap();
+    let line = linemap.line(pos.offset);
+    let col = pos.offset - linemap.get(line).unwrap();
+
+    let line = line as u32;
+    let col = col as u32;
     Position {
-        line: (x.line - 1) as u32,
-        character: x.col as u32,
+        line,
+        character: col,
     }
 }

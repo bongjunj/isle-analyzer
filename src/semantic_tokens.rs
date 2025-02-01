@@ -11,7 +11,6 @@ use cranelift_isle::files::Files;
 use cranelift_isle::parser::parse;
 use cranelift_isle::{
     ast::*,
-    error::Errors,
     lexer::{Lexer, Token},
 };
 use lsp_server::*;

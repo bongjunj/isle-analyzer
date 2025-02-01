@@ -37,19 +37,19 @@ pub fn on_hover_request(context: &Context, request: &Request) {
         .unwrap();
 }
 
-fn hover_on_item_or_access(ia: &ItemOrAccess, p: &Project) -> String {
+fn hover_on_item_or_access(ia: &ItemOrAccess, _p: &Project) -> String {
     let item_hover = |item: &Item| -> String {
-        let pos = item.def_loc();
-        let fpath = p.file_index_path(pos.0.file);
-        let comment = if let Some(fpath) = fpath.as_ref() {
-            p.comments
-                .get(fpath)
-                .map(|d| d.get_comment(&pos.0).map(|x| x.as_str()))
-                .flatten()
-                .unwrap_or("")
-        } else {
-            ""
-        };
+        // let pos = item.def_loc();
+        // let fpath = p.file_index_path(pos.0.file);
+        // let comment = if let Some(fpath) = fpath.as_ref() {
+        //     p.comments
+        //         .get(fpath)
+        //         .map(|d| d.get_comment(&pos.0).map(|x| x.as_str()))
+        //         .flatten()
+        //         .unwrap_or("")
+        // } else {
+        //     ""
+        // };
         let item_str = match item {
             Item::EnumVariant { v } if v.fields.len() > 0 => {
                 let mut s = format!("{}\n\n", v.name.0);
@@ -61,7 +61,8 @@ fn hover_on_item_or_access(ia: &ItemOrAccess, p: &Project) -> String {
             }
             _ => format!("{}", item),
         };
-        format!("{}\n{}", comment, item_str)
+        // format!("{}\n{}", comment, item_str)
+        item_str
     };
     match ia {
         ItemOrAccess::Item(item) => item_hover(item),

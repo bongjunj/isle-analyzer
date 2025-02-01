@@ -66,8 +66,6 @@ impl Default for Item {
 pub const UNKNOWN_POS: Pos = Pos {
     file: 999,
     offset: 0,
-    line: 1,
-    col: 0,
 };
 
 lazy_static! {
